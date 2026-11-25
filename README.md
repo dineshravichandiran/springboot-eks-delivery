@@ -7,7 +7,7 @@ Amazon EKS with the same image tag.
 | | |
 |---|---|
 | Built with | Java 21, Spring Boot 3.5.16, Maven, JUnit 5, Mockito, JaCoCo, SonarQube Community Build, Docker, GitHub Actions, Amazon ECR, Amazon EKS, Helm, CloudFormation |
-| Status | **written; first CI run pending** (see "What has and has not run") |
+| Status | **CI passing** (tests, SonarQube gate, image smoke test, chart and infra checks); **ECR push and EKS promotion not yet run** |
 | License | All rights reserved, view only |
 
 ## How a change flows
@@ -50,16 +50,18 @@ pull request ──> test-and-gate ──> image ──> (main only) push to ECR
 
 ## What has and has not run
 
-Nothing in this repository has been executed yet; the first GitHub Actions run is the first test of every part below.
-This table is updated from real runs only.
+Results below come from GitHub Actions run #5 on `main`
+([run page](https://github.com/dineshravichandiran/springboot-eks-delivery/actions/runs/45642939841)); the first four runs
+failed on bugs in my SonarQube setup script and were fixed.
 
 | Part | Status |
 |---|---|
-| Unit tests (20 written) | not yet run |
-| SonarQube gate in CI | not yet run |
-| Container build and smoke test | not yet run |
-| Helm lint and kubeconform for DEV, QA, PROD | not yet run |
-| `cfn-lint` and `checkov` on the infra template | run locally: cfn-lint clean, checkov 11 passed, 0 failed, 2 skipped (each explained in the template) |
+| Unit tests | **20 run, 0 failed, 0 skipped** (ItemServiceTest 9, ItemControllerTest 8, ItemsApplicationTest 3) |
+| SonarQube quality gate in CI | **passed**: coverage 95.2% (fails below 80), duplicated lines 0.0% (fails above 3), reliability rating 1 and security rating 1 (fail when worse than 1, which is A) |
+| Container build and smoke test | **passed**: runs as uid 10001, readiness probe UP, an item created and read back |
+| Helm lint and kubeconform for DEV, QA, PROD | **passed** |
+| `cfn-lint` and `checkov` on the infra template | **passed** (checkov: 11 passed, 0 failed, 2 skipped, each explained in the template) |
+| Gate actually blocking a merge | not demonstrated: needs the branch protection rule in docs/PROMOTION.md and a pull request that fails the gate |
 | Push to ECR | not run (needs an AWS account and the setup in docs/PROMOTION.md) |
 | Helm deploy and promotion on EKS | not run (needs a cluster) |
 

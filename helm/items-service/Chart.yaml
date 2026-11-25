@@ -1,0 +1,6 @@
+apiVersion: v2
+name: items-service
+description: Spring Boot items-service, promoted DEV -> QA -> PROD with one chart and one values file per environment
+type: application
+version: 1.0.0
+appVersion: "1.0.0"

@@ -1,0 +1,196 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 1. Unit tests + a real SonarQube quality gate. A failing gate fails this job, and with branch protection
+  #    (see docs/PROMOTION.md) a red job blocks the merge.
+  test-and-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Start SonarQube (Community Build) for this run
+        run: |
+          docker run -d --name sonarqube -p 9000:9000 \
+            -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true sonarqube:community
+          for i in $(seq 1 60); do
+            if curl -s http://localhost:9000/api/system/status | grep -q '"status":"UP"'; then
+              echo "SonarQube is up"; exit 0
+            fi
+            sleep 5
+          done
+          docker logs sonarqube | tail -50
+          echo "SonarQube did not start in time"; exit 1
+
+      - name: Create token and quality gate
+        id: sonar
+        run: scripts/sonar-provision.sh
+
+      - name: Build, unit-test and analyse (fails if the quality gate fails)
+        run: |
+          mvn -B -ntp -f app/pom.xml verify \
+            org.sonarsource.scanner.maven:sonar-maven-plugin:5.9.0.7382:sonar \
+            -Dsonar.host.url=http://localhost:9000 \
+            -Dsonar.token='${{ steps.sonar.outputs.token }}' \
+            -Dsonar.projectKey=items-service \
+            -Dsonar.projectName=items-service \
+            -Dsonar.qualitygate.wait=true
+
+      - name: Unit test summary
+        if: always()
+        run: scripts/summarize.py tests app/target/surefire-reports
+
+      - name: Quality gate summary
+        if: always() && steps.sonar.outputs.password != ''
+        run: scripts/summarize.py gate http://localhost:9000 admin '${{ steps.sonar.outputs.password }}' items-service
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-reports
+          path: app/target/surefire-reports
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-jar
+          path: app/target/items-service.jar
+          retention-days: 3
+
+  # 2. Build the image from the jar that passed the tests, smoke-test it, and (on main, when deployment is
+  #    enabled) push it to ECR once. The same tag is then promoted; nothing is rebuilt per environment.
+  image:
+    needs: test-and-gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: app-jar
+          path: app/target
+
+      - name: Build image
+        run: docker build --build-arg APP_VERSION="${GITHUB_SHA}" -t items-service:ci app
+
+      - name: Smoke test the container
+        run: |
+          test "$(docker run --rm --entrypoint id items-service:ci -u)" = "10001"
+          docker run -d --name smoke -p 8080:8080 items-service:ci
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8080/actuator/health/readiness && break
+            sleep 2
+          done
+          curl -sf -X POST http://localhost:8080/api/items -H 'Content-Type: application/json' \
+            -d '{"name":"smoke","quantity":1}'
+          curl -sf http://localhost:8080/api/items | grep smoke
+          docker logs smoke | tail -5
+          echo "### Container smoke test passed (runs as uid 10001, readiness UP, create and read an item)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Configure AWS credentials (only when deployment is enabled)
+        if: github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Push to ECR
+        if: github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Tag and push (immutable tag = commit SHA)
+        if: github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+        run: |
+          IMAGE="${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${GITHUB_SHA}"
+          docker tag items-service:ci "$IMAGE"
+          docker push "$IMAGE"
+          echo "### Pushed ${IMAGE}" >> "$GITHUB_STEP_SUMMARY"
+
+  # 3. The chart is checked for every environment before anything can be promoted.
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+      - name: Install kubeconform
+        run: |
+          curl -sSfL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz
+          sudo mv kubeconform /usr/local/bin/
+      - name: Lint and validate DEV, QA and PROD
+        run: |
+          for env in dev qa prod; do
+            helm lint helm/items-service -f helm/items-service/values-${env}.yaml \
+              --set image.repository=example.invalid/items-service --set image.tag=abc123
+            helm template items-service helm/items-service -f helm/items-service/values-${env}.yaml \
+              --set image.repository=example.invalid/items-service --set image.tag=abc123 \
+              | kubeconform -strict -summary -kubernetes-version 1.33.0
+          done
+
+  # 4. The ECR/OIDC template is linted and policy-checked.
+  infra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install cfn-lint checkov
+      - run: cfn-lint infra/*.yml
+      - run: checkov -d infra --framework cloudformation --compact --quiet
+        env:
+          CKV_NO_PLATFORM: "true"
+
+  # 5. Promotion DEV -> QA -> PROD. Off until the repository variable DEPLOY_ENABLED is 'true'
+  #    (see docs/PROMOTION.md). QA and PROD use GitHub Environments; PROD should require a reviewer.
+  deploy-dev:
+    needs: [image, helm]
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: dev
+      image_tag: ${{ github.sha }}
+    permissions:
+      contents: read
+      id-token: write
+
+  deploy-qa:
+    needs: deploy-dev
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: qa
+      image_tag: ${{ github.sha }}
+    permissions:
+      contents: read
+      id-token: write
+
+  deploy-prod:
+    needs: deploy-qa
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: prod
+      image_tag: ${{ github.sha }}
+    permissions:
+      contents: read
+      id-token: write

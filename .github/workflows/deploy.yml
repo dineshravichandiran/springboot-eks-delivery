@@ -1,0 +1,55 @@
+name: deploy
+
+# Reusable: deploys one image tag to one environment (namespace) with Helm. Called three times by ci.yml.
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      image_tag:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      - name: Connect to the cluster
+        run: aws eks update-kubeconfig --name "${{ vars.EKS_CLUSTER_NAME }}" --region "${{ vars.AWS_REGION }}"
+
+      - name: Helm upgrade
+        run: |
+          ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+          REGISTRY="${ACCOUNT}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com"
+          helm upgrade --install items-service helm/items-service \
+            --namespace "${{ inputs.environment }}" \
+            -f "helm/items-service/values-${{ inputs.environment }}.yaml" \
+            --set image.repository="${REGISTRY}/${{ vars.ECR_REPOSITORY }}" \
+            --set image.tag="${{ inputs.image_tag }}" \
+            --atomic --wait --timeout 5m
+
+      - name: Smoke test through a port-forward
+        run: |
+          kubectl -n "${{ inputs.environment }}" rollout status deployment/items-service --timeout=120s
+          kubectl -n "${{ inputs.environment }}" port-forward svc/items-service 8080:80 &
+          sleep 5
+          curl -sf http://localhost:8080/actuator/health/readiness
+          echo "### ${{ inputs.environment }}: ${{ inputs.image_tag }} deployed and healthy" >> "$GITHUB_STEP_SUMMARY"
+          helm -n "${{ inputs.environment }}" history items-service | tail -3 >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,32 @@
+# Defaults shared by every environment. Each environment overrides only what differs (values-dev|qa|prod.yaml).
+replicaCount: 1
+
+image:
+  repository: ""        # set by the pipeline to the ECR repository URI
+  tag: ""               # set by the pipeline to the git commit SHA; the same tag is promoted to every environment
+  pullPolicy: IfNotPresent
+
+service:
+  port: 80
+  targetPort: 8080
+
+environment: dev        # shown in the info endpoint and labels
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+extraEnv: []

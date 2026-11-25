@@ -1,0 +1,115 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  ECR repository for items-service and the IAM role GitHub Actions assumes through OIDC (no stored AWS keys).
+  The role can push to this one repository and describe one EKS cluster; Kubernetes permissions are granted
+  separately with EKS access entries scoped to the dev, qa and prod namespaces (see docs/PROMOTION.md).
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Default: dineshravichandiran
+  GitHubRepo:
+    Type: String
+    Default: springboot-eks-delivery
+  RepositoryName:
+    Type: String
+    Default: items-service
+  EksClusterName:
+    Type: String
+    Description: Name of the EKS cluster the pipeline deploys to.
+  CreateOidcProvider:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Set to false if token.actions.githubusercontent.com already exists as an OIDC provider in this account.
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ""
+    Description: Required when CreateOidcProvider is false.
+
+Conditions:
+  MakeProvider: !Equals [!Ref CreateOidcProvider, "true"]
+
+Resources:
+  ImageRepository:
+    Type: AWS::ECR::Repository
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_136
+            comment: "Encrypted with the AWS-managed ECR key (aws/ecr); a customer-managed key adds a monthly cost for a lab"
+    Properties:
+      RepositoryName: !Ref RepositoryName
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: KMS
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"Keep the last 30 images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":30},"action":{"type":"expire"}}]}
+
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: MakeProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_60
+            comment: "Trust is restricted to this repository's main branch and its dev, qa and prod environments"
+    Properties:
+      RoleName: !Sub "${GitHubRepo}-pipeline"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [MakeProvider, !Ref GitHubOidcProvider, !Ref ExistingOidcProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                "token.actions.githubusercontent.com:aud": sts.amazonaws.com
+              StringLike:
+                "token.actions.githubusercontent.com:sub":
+                  - !Sub "repo:${GitHubOwner}/${GitHubRepo}:ref:refs/heads/main"
+                  - !Sub "repo:${GitHubOwner}/${GitHubRepo}:environment:dev"
+                  - !Sub "repo:${GitHubOwner}/${GitHubRepo}:environment:qa"
+                  - !Sub "repo:${GitHubOwner}/${GitHubRepo}:environment:prod"
+      Policies:
+        - PolicyName: push-image-and-describe-cluster
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EcrLogin
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: PushToThisRepositoryOnly
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:CompleteLayerUpload
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: !GetAtt ImageRepository.Arn
+              - Sid: DescribeTheCluster
+                Effect: Allow
+                Action: eks:DescribeCluster
+                Resource: !Sub "arn:${AWS::Partition}:eks:${AWS::Region}:${AWS::AccountId}:cluster/${EksClusterName}"
+
+Outputs:
+  RepositoryUri:
+    Value: !GetAtt ImageRepository.RepositoryUri
+  RoleArn:
+    Value: !GetAtt PipelineRole.Arn
+    Description: Put this in the repository variable AWS_ROLE_ARN

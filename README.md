@@ -61,7 +61,7 @@ failed on bugs in my SonarQube setup script and were fixed.
 | Container build and smoke test | **passed**: runs as uid 10001, readiness probe UP, an item created and read back |
 | Helm lint and kubeconform for DEV, QA, PROD | **passed** |
 | `cfn-lint` and `checkov` on the infra template | **passed** (checkov: 11 passed, 0 failed, 2 skipped, each explained in the template) |
-| Gate actually blocking a merge | not demonstrated: needs the branch protection rule in docs/PROMOTION.md and a pull request that fails the gate |
+| Gate actually blocking a merge | **demonstrated**: branch protection on `main` requires `test-and-gate`, `helm` and `infra`. Pull request #1 adds untested code, its `test-and-gate` check fails on coverage (34.2%, the gate needs 80%) and GitHub keeps Merge disabled. The pull request is left open as evidence |
 | Push to ECR | not run (needs an AWS account and the setup in docs/PROMOTION.md) |
 | Helm deploy and promotion on EKS | not run (needs a cluster) |
 

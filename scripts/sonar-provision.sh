@@ -23,7 +23,8 @@ call() { # call <label> <api-path> [curl args...]; prints the body; annotates ev
   esac
 }
 
-NEW_PASSWORD="$(openssl rand -hex 16)"
+# SonarQube enforces a password policy (length, upper and lower case, digit, special character).
+NEW_PASSWORD="Ci_$(openssl rand -hex 12)_Zz9-"
 echo "::add-mask::${NEW_PASSWORD}"
 
 call "change_password" users/change_password \

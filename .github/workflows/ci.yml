@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
@@ -45,6 +45,7 @@ jobs:
         run: scripts/sonar-provision.sh
 
       - name: Build, unit-test and analyse (fails if the quality gate fails)
+        id: build
         run: |
           mvn -B -ntp -f app/pom.xml verify \
             org.sonarsource.scanner.maven:sonar-maven-plugin:5.9.0.7382:sonar \
@@ -55,11 +56,11 @@ jobs:
             -Dsonar.qualitygate.wait=true
 
       - name: Unit test summary
-        if: always()
+        if: always() && steps.build.outcome != 'skipped'
         run: scripts/summarize.py tests app/target/surefire-reports
 
       - name: Quality gate summary
-        if: always() && steps.sonar.outputs.password != ''
+        if: always() && steps.build.outcome != 'skipped' && steps.sonar.outputs.password != ''
         run: scripts/summarize.py gate http://localhost:9000 admin '${{ steps.sonar.outputs.password }}' items-service
 
       - uses: actions/upload-artifact@v4

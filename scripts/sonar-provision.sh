@@ -9,16 +9,18 @@ SONAR_URL="${SONAR_URL:-http://localhost:9000}"
 GATE="items-service-gate"
 PASSWORD="admin"
 
-call() { # call <label> <api-path> [curl args...]; prints the body, annotates and fails on HTTP >= 400
+LAST_BODY="$(mktemp)"
+trap 'echo "::error title=sonar-provision failed at line ${LINENO}::last response: $(tr "\n" " " < "${LAST_BODY}" | head -c 500)"' ERR
+
+call() { # call <label> <api-path> [curl args...]; prints the body; annotates every call; fails unless HTTP 2xx
   local label="$1" path="$2"; shift 2
-  local body code
-  body="$(mktemp)"
-  code="$(curl -s -o "$body" -w '%{http_code}' -u "admin:${PASSWORD}" -X POST "${SONAR_URL}/api/${path}" "$@")"
-  if [ "$code" -ge 400 ]; then
-    echo "::error title=SonarQube API ${label} HTTP ${code}::$(tr '\n' ' ' < "$body" | head -c 600)"
-    return 1
-  fi
-  cat "$body"
+  local code
+  code="$(curl -s -o "${LAST_BODY}" -w '%{http_code}' -u "admin:${PASSWORD}" -X POST "${SONAR_URL}/api/${path}" "$@" || true)"
+  echo "::notice title=SonarQube API ${label}::HTTP ${code}"
+  case "${code}" in
+    2??) cat "${LAST_BODY}" ;;
+    *) echo "::error title=SonarQube API ${label} HTTP ${code}::$(tr '\n' ' ' < "${LAST_BODY}" | head -c 600)"; return 1 ;;
+  esac
 }
 
 NEW_PASSWORD="$(openssl rand -hex 16)"
@@ -28,7 +30,8 @@ call "change_password" users/change_password \
   --data-urlencode login=admin --data-urlencode previousPassword=admin --data-urlencode "password=${NEW_PASSWORD}" > /dev/null
 PASSWORD="${NEW_PASSWORD}"
 
-TOKEN="$(call "generate_token" user_tokens/generate -d name=ci | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+TOKEN_JSON="$(call "generate_token" user_tokens/generate -d name=ci)"
+TOKEN="$(printf '%s' "${TOKEN_JSON}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
 echo "::add-mask::${TOKEN}"
 
 call "create_gate" qualitygates/create -d "name=${GATE}" > /dev/null
